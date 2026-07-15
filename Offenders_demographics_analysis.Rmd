@@ -1,0 +1,415 @@
+---
+title: 'Understanding Offender Demographics in New Zealand: Age and Ethnicity Patterns, 2016–2024'
+author: "Zara Munoz Delgadillo"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,   
+  message = FALSE,
+  warning = FALSE
+)
+library(here)
+library(dplyr); library(ggplot2); library(stringr); library(readr)
+library(tidyr); library(scales)
+
+YEAR_MIN <- 2016; YEAR_MAX <- 2024
+MAJOR_ETH <- c("European","Māori","Pacific Island","Asian","Indian")
+DROP_ETH_REGEX <- c("^\\s*not\\s*stated\\s*$",
+                    "^\\s*not\\s*elsewhere\\s*classified\\s*$")
+
+```
+
+
+
+# Introduction
+
+Criminal offending in New Zealand is a significant challenge for communities and for the justice system, influencing how resources are allocated and how prevention and rehabilitation programmes are designed. Official police records capture a broad spectrum of offences, ranging from violent crime to property-related offences, and include demographic information like age, gender, ethnicity, and location. These records provide a valuable basis for understanding long-term patterns and emerging trends in offending behaviour. 
+
+In this report, an offender refers to a *"person or organisation Police apprehend because Police allege the person or organisation is involved in a criminal incident involving one or more offences"* (New Zealand Police, 2016:7)
+
+This study focuses specifically on offender age and reported ethnicity. The aim is to assess how the age distribution of offenders has shifted over time and to determine whether these patterns vary across ethnic groups. These insights are relevant because they can inform the evaluation of current policies, the design of rehabilitation initiatives, and the development of targeted prevention strategies.
+
+The period of analysis focuses from 2016 to 2024, ensuring that results are comparable across full calendar years and reflect recent changes in crime demographics.
+
+The guiding research question for this report is:
+
+*How has the age distribution of unique offenders in New Zealand changed over time, and do these trends differ across ethnic groups?*
+
+\newpage
+
+# Methods 
+
+The dataset used in this study comes from the New Zealand Police Unique Offenders (demographics) records. It contains monthly counts of unique offenders, classified by offence type, demographic attributes, and time. For comparability across full years, the period of analysis was restricted to 2016–2024.
+
+The study relies on four baseline variables:
+
+- Year (integer), extracted from Year.Month, serving as the temporal index.
+
+- Age.Group (categorical), converted to numeric midpoints to enable continuous age calculations.
+
+- Offender.Count (numeric), the number of unique offenders per age × year × ethnicity cell; used both as the outcome measure and as weights in averages.
+
+- Ethnicity (categorical), cleaned and recoded to exclude residual categories like “Not Stated” and “Not Elsewhere Classified.”
+
+The data cleaning process involved selecting relevant variables, standardising formats, and excluding incomplete or ambiguous records. Average offender age was estimated using weighted means, combining age midpoints with offender counts. Weighting was considered an essential step, because age groups differ considerably in size, and without it, small groups could influence the average. Offender counts were then aggregated by year × ethnicity and expressed both as raw totals and proportions. Additional transformations included re-categorising ethnicity labels and collapsing age groups into broader bands (Under 25, 25–39, 40+) to support clearer interpretation of demographic trends over time.
+
+```{r dataset_cleansing}
+
+# Load dataset
+csv_path <- here::here("data", "ANZSOC Tab_Full Data_data.csv")
+stopifnot(file.exists(csv_path))
+
+# 3.- Loading dataset
+policedata <- read_csv("data/ANZSOC Tab_Full Data_data.csv", show_col_types = FALSE)
+
+# 4.- Flexible column picking function
+nm <- names(policedata)
+
+pick1 <- function(patterns) {
+  hit <- character(0)
+  for (rx in patterns) {
+    hit <- nm[str_detect(nm, regex(rx, ignore_case = TRUE))]
+    if (length(hit)) return(hit[1])
+  }
+  character(0)
+}
+
+col_yearmonth <- pick1(c("^year\\.?month$", "year.*month"))
+col_agegroup  <- pick1(c("^age\\.?group$", "age.*group"))
+col_offcount  <- pick1(c("^offender\\.?count$", "offend.*count"))
+col_ethnicity <- pick1(c("^ethnicity$", "ethni"))
+
+stopifnot(nzchar(col_yearmonth), nzchar(col_agegroup),
+          nzchar(col_offcount), nzchar(col_ethnicity))
+
+# 5.- Keep only the needed columns and normalise types
+dat <- policedata %>%
+  select(
+    Year.Month     = all_of(col_yearmonth),
+    Age.Group      = all_of(col_agegroup),
+    Offender.Count = all_of(col_offcount),
+    Ethnicity      = all_of(col_ethnicity)
+  ) %>%
+  mutate(
+    Year = suppressWarnings(as.integer(str_extract(Year.Month, "\\d{4}")))
+  )
+
+# 6.- Convert Age.Group from strings to numeric midpoints
+ag <- as.character(dat$Age.Group)
+lower_age <- suppressWarnings(as.integer(str_extract(ag, "\\d+")))
+upper_age <- suppressWarnings(as.integer(str_extract(ag, "(?<=-)\\d+")))
+is_plus   <- str_detect(ag, "\\+")
+upper_age[is_plus] <- Inf
+
+age_mid <- ifelse(is.infinite(upper_age),
+                  lower_age + 2.5,     # e.g. "85+" → ~87.5
+                  (lower_age + upper_age) / 2)
+
+dat <- dat %>%
+  mutate(
+    lower_age = lower_age,
+    upper_age = upper_age,
+    age_mid   = age_mid,
+    Ethnicity = as.factor(trimws(as.character(Ethnicity)))
+  ) %>%
+  filter(!is.na(Year), !is.na(age_mid), !is.na(Offender.Count))
+
+# 7.- Filter years + drop unwanted ethnicity categories
+drop_eth <- function(x) {
+  to_drop <- Reduce(`|`, lapply(DROP_ETH_REGEX, function(rx) grepl(rx, x, ignore.case = TRUE)))
+  !to_drop
+}
+
+dat_ns <- dat %>%
+  filter(Year >= YEAR_MIN, Year <= YEAR_MAX) %>%
+  filter(drop_eth(as.character(Ethnicity)))
+
+knitr::opts_chunk$set(
+  fig.width = 7,
+  fig.height = 4.6,
+  out.width = "80%"
+)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(size = 9)
+    )
+)
+
+year_breaks <- seq(YEAR_MIN, YEAR_MAX, by = 2)
+
+```
+
+\newpage
+
+# Results
+
+The following section presents graphs and a table that illustrate the key findings, highlighting the main demographic trends in offending within the period 2016 - 2024.
+
+## Average age of offenders, period 2016–2024
+
+Figure 1 shows the average age of offenders between 2016–2024. The results indicate a steady upward trend, with the average age rising consistently over the eight year period.
+
+
+
+```{r avg_offender_age, fig.width=6, fig.height=4}
+avg_age_by_year <- dat_ns %>%
+  group_by(Year) %>%
+  summarise(avg_age = weighted.mean(age_mid, Offender.Count, na.rm = TRUE), .groups = "drop")
+ggplot(avg_age_by_year, aes(x = Year, y = avg_age)) +
+  geom_line(color = "steelblue", linewidth = 1.1) +
+  geom_point(color = "darkred", size = 1.8) +
+  scale_x_continuous(breaks = year_breaks) +
+  labs(
+    title = "Average age of offenders, period 2016–2024",
+    x = "Year", y = "Weighted Average Age (years)"
+  )
+```
+
+*Figure 1. Average age of offenders, period 2016–2024.*
+
+
+
+## Proportion of offenders by ethnicity, period 2016–2024
+
+Figure 2 shows the percentage of offenders by declared ethnicity between 2016 and 2024. Māori and European consistently represent the largest offender groups. This trend reflects broader population patterns, as Europeans (67.8%) and Māori (17.8%) are the two largest ethnic populations in New Zealand according to the 2023 Census (Stats NZ, 2024).
+
+
+```{r offenders_by_ethnicity}
+eth_year_ns <- dat_ns %>%
+  group_by(Year, Ethnicity) %>%
+  summarise(total_offenders = sum(Offender.Count, na.rm = TRUE), .groups = "drop")
+
+eth_order <- eth_year_ns %>%
+  group_by(Ethnicity) %>%
+  summarise(grand_total = sum(total_offenders), .groups = "drop") %>%
+  arrange(desc(grand_total)) %>% pull(Ethnicity)
+
+eth_year_prop <- eth_year_ns %>%
+  group_by(Year) %>%
+  mutate(share = total_offenders / sum(total_offenders),
+         Ethnicity = factor(as.character(Ethnicity), levels = eth_order)) %>%
+  ungroup()
+
+ggplot(eth_year_prop, aes(x = Year, y = share, color = Ethnicity)) +
+  geom_line(linewidth = 1.1) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 2)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Proportion of offenders by ethnicity, period 2016–2024",
+       x = "Year", y = "Percentage of Offenders", color = "Ethnicity") +
+  guides(color = guide_legend(nrow = 2, byrow = TRUE)) +  
+  theme(legend.position = "bottom",
+        legend.key.width = unit(10, "pt"),
+        legend.text = element_text(size = 9),
+        plot.margin = margin(t = 6, r = 10, b = 14, l = 10))  
+
+```
+
+*Figure 2. Proportion of offenders by ethnicity, period 2016–2024.*
+
+
+## Proportion of offenders by age group, period 2016 - 2024
+
+Figure 3 and 4 below show the percentage of offenders across three age groups (Under 25 / 25–39 / 40+) in the period from 2016 to 2024. The results indicate a steady decline in the share of offenders under 25, alongside an increase in the proportion aged 40 and over. The 25–39 age group remains the largest category throughout the period, although its share has stabilised in recent years.
+
+```{r proportion_of_offenders_plot, fig.width=7, fig.height=4.6, out.width="75%"}
+young_levels <- c("10-14","15-19","20-24")
+older_levels <- c("40-44","45-49","50-54","55-59","60-64",
+                  "65-69","70-74","75-79","80-84","85+")
+
+age_buckets <- dat_ns %>%
+  mutate(bucket = case_when(
+    Age.Group %in% young_levels ~ "Under 25",
+    Age.Group %in% older_levels ~ "40+",
+    TRUE ~ "25–39"
+  )) %>%
+  group_by(Year, bucket) %>%
+  summarise(total = sum(Offender.Count, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Year) %>%
+  mutate(share = total / sum(total)) %>%
+  ungroup()
+
+ggplot(age_buckets, aes(x = Year, y = share, color = bucket)) +
+  geom_line(linewidth = 1.05) +
+  geom_point(size = 1.6) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 2)) +  
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Proportion of offenders by age group, period 2016 - 2024",
+    x = "Year", y = "Proportion of Offenders", color = "Age Group"
+  ) +
+  guides(color = guide_legend(nrow = 1)) +
+  theme(legend.position = "bottom")
+
+age_buckets_eth <- dat_ns %>%
+  filter(Ethnicity %in% MAJOR_ETH) %>%
+  mutate(bucket = case_when(
+    Age.Group %in% young_levels ~ "Under 25",
+    Age.Group %in% older_levels ~ "40+",
+    TRUE ~ "25–39"
+  )) %>%
+  group_by(Year, Ethnicity, bucket) %>%
+  summarise(total = sum(Offender.Count, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Year, Ethnicity) %>%
+  mutate(share = total / sum(total)) %>%
+  mutate(Ethnicity = factor(as.character(Ethnicity), levels = eth_order))
+```
+
+*Figure 3. Proportion of offenders by age group, period 2016 - 2024*
+
+
+
+```{r offenders_by_age_bucket_table}
+
+young_levels <- c("10-14","15-19","20-24")
+older_levels <- c("40-44","45-49","50-54","55-59","60-64",
+                  "65-69","70-74","75-79","80-84","85+")
+
+age_bucket_summary <- dat_ns %>%
+  mutate(bucket = case_when(
+    Age.Group %in% young_levels ~ "Under 25",
+    Age.Group %in% older_levels ~ "40+",
+    TRUE ~ "25–39"
+  )) %>%
+  group_by(Year, bucket) %>%
+  summarise(total = sum(Offender.Count, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Year) %>%
+  mutate(share = total / sum(total)) %>%
+  select(Year, bucket, share)
+
+```
+
+```{r table_offenders_by_age_bucket}
+age_bucket_wide <- tidyr::pivot_wider(
+  age_bucket_summary,
+  names_from = bucket,
+  values_from = share
+)
+
+knitr::kable(
+  age_bucket_wide,
+  caption = "Proportion of offenders by age bucket (2016–2024).",
+  digits = 2
+)
+
+```
+
+*Figure 4. Proportion of offenders by age bucket (2016–2024)*
+
+
+## Proportion of offenders by age group and ethnicity, period 2016 - 2024
+
+Figure 5 shows the percentage of offenders across three age groups (Under 25, 25–39, and 40+) disaggregated by the five major ethnicities. The results indicate a consistent pattern across groups: the proportion of offenders under 25 declines steadily, while the share of offenders aged 40 and over increases. The 25–39 category remains the largest across all ethnicities, though its relative share has stabilised in recent years
+
+```{r plot_age_buckets_eth}
+ggplot(age_buckets_eth, aes(x = Year, y = share, color = bucket)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 1.6) +
+  scale_x_continuous(breaks = c(2016, 2020, 2024)) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(
+    title = "Proportion of offenders by age group and ethnicity, period 2016 - 2024",
+       x = "Year", y = "Proportion of Offenders", color = "Age Group"
+    ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 9),
+    strip.text   = element_text(face = "bold", margin = margin(b = 4)),
+    panel.spacing.x = unit(16, "pt"),
+    panel.spacing.y = unit(12, "pt"),
+    plot.margin  = margin(t = 6, r = 10, b = 12, l = 10)
+  ) +
+  facet_wrap(~ Ethnicity, ncol = 3, drop = TRUE)
+```
+
+*Figure 5. Proportion of offenders by age group and ethnicity, period 2016 - 2024* 
+
+\newpage
+
+## Discussion
+
+This study examined how the age distribution of offenders in New Zealand has changed between 2016 and 2024, and whether these trends differ across ethnic groups. The analysis shows a clear demographic shift: the proportion of offenders under 25 has steadily declined, while the share of offenders aged 40 and above increased. The 25–39 age group remains the largest, but its relative share has stabilised in recent years.
+
+When disaggregated by ethnicity, the overall aging trend is consistent across Māori, European, Pacific Island, Indian, and Asian groups. However, differences in baseline profiles remain: Māori and Pacific offenders have comparatively younger age distributions, whereas Indian and Asian groups display stronger growth in the 40+ category.
+
+These findings directly answer the research question: the offender population in New Zealand is aging. While the trend is observed in all major ethnic groups, the extent and pace of change vary by community.
+
+The results suggest that youth-focused interventions may be contributing to reduced offending in younger cohorts, while older age groups are becoming increasingly prominent. Future strategies should address the needs of older offenders, while tailoring programmes to reflect the distinct age profiles of specific communities.
+
+In terms of limitation, it becomes relevant to highlight that these results are based on aggregated police records, which reflect reported and recorded offences rather than all criminal behavior. Ethnicity classifications rely on self- or police-reported data, which may introduce inconsistencies, and the use of broad age buckets may mask finer-grained trends within subgroups. In addition, this study focused on demographic patterns and did not analyse the specific types of offences committed by different age or ethnic groups. Understanding offence types would provide a more granular picture of offending behavior and could help the develop of tailored interventions to community needs. While not addressed here, the current findings contribute an important baseline for future analyses.
+
+\newpage
+
+# Appendix
+
+## Citations
+
+- New Zealand Police (2016). *NZ Recorded Crime - Offenders User Manual November 2016*: https://www.police.govt.nz/sites/default/files/publications/nz_recorded_crime_offenders_manual_v1.1.pdf
+
+- Stats New Zealand (2024). *2023 Census population counts (by ethnic group, age, and Māori descent) and dwelling counts*:
+https://www.stats.govt.nz/information-releases/2023-census-population-counts-by-ethnic-group-age-and-maori-descent-and-dwelling-counts/
+
+## Additional Visualisations
+
+### Total offenders by Ethnicity, period 2016 - 2024
+
+Figure 6 shows the distribution of offenders by declared ethnicity between 2016 and 2024. Māori and European consistently represent the largest offender groups. This trend reflects broader population patterns, as Europeans (67.8%) and Māori (17.8%) are the two largest ethnic populations in New Zealand according to the 2023 Census (Stats NZ, 2024).
+
+```{r}
+eth_year_ns <- dat_ns %>%
+  group_by(Year, Ethnicity) %>%
+  summarise(total_offenders = sum(Offender.Count, na.rm = TRUE), .groups = "drop")
+
+eth_order <- eth_year_ns %>%
+  group_by(Ethnicity) %>%
+  summarise(grand_total = sum(total_offenders), .groups = "drop") %>%
+  arrange(desc(grand_total)) %>% pull(Ethnicity)
+
+eth_year_plot_ns <- eth_year_ns %>%
+  mutate(Ethnicity = factor(as.character(Ethnicity), levels = eth_order))
+
+ggplot(eth_year_plot_ns, aes(x = Year, y = total_offenders, color = Ethnicity)) +
+geom_line(linewidth = 1.2) +
+  scale_x_continuous(breaks = YEAR_MIN:YEAR_MAX) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Total offenders by Ethnicity, period 2016 - 2024",
+       x = "Year", y = "Total Offender Count", color = "Ethnicity") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+*Figure 6. Total offenders by Ethnicity, period 2016 - 2024*
+
+
+### Average age of offenders by ethnicity, period 2016 - 2024
+
+Figure 7 displays the mean age of offenders by ethnicity in the period between 2016 - 2024. 
+
+```{r}
+# 11.- PLOT 3: Average offender age by ethnicity (all groups) 
+avg_age_eth_year <- dat_ns %>%
+  group_by(Year, Ethnicity) %>%
+  summarise(
+    avg_age = weighted.mean(age_mid, Offender.Count, na.rm = TRUE),
+    offenders = sum(Offender.Count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Ethnicity = factor(as.character(Ethnicity), levels = eth_order)) %>%
+  arrange(Year, Ethnicity)
+
+ggplot(avg_age_eth_year, aes(x = Year, y = avg_age, color = Ethnicity)) +
+  geom_line(linewidth = 1.1) + geom_point(size = 1.5) +
+  scale_x_continuous(breaks = YEAR_MIN:YEAR_MAX) +
+  labs(title = "Average age of offenders by ethnicity, period 2026 - 2024",
+       x = "Year", y = "Weighted Average Age (years)", color = "Ethnicity") +
+  theme_minimal() + theme(legend.position = "bottom")
+```
+
+*Figure 7. Average age of offenders by ethnicity, period 2016 - 2024*
+
